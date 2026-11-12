@@ -43,6 +43,23 @@ def invalid(message: str) -> RpcError:
     return RpcError(-32602, "invalidParams", message)
 
 
+def webp_to_png(data: bytes, max_side: int = 480) -> bytes:
+    """A grayscale PNG no wider or taller than an e-ink screen; the original bytes if Pillow fails."""
+    import io
+
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as im:
+            im = im.convert("L")
+            im.thumbnail((max_side, max_side))
+            out = io.BytesIO()
+            im.save(out, format="PNG", optimize=True)
+            return out.getvalue()
+    except Exception:  # an unreadable image stays as it was
+        return data
+
+
 def stamp(seconds: float) -> str:
     return dt.datetime.fromtimestamp(seconds, dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -84,6 +101,7 @@ class Api:
             "media.get": self.media_get,
             "reviews.list": self.reviews_list,
             "advanced.reviews.import": self.reviews_import,
+            "reviews.getLatestId": self.reviews_latest,
             "advanced.cards.update": self.cards_update,
             "scheduling.setDueDate": self.set_due_date,
         }
@@ -355,6 +373,8 @@ class Api:
             raise not_found("Media file")
         with open(path, "rb") as f:
             data = f.read()
+        if name.lower().endswith(".webp"):
+            data = webp_to_png(data)  # e-ink readers decode PNG, not WebP
         return {"filename": name, "data": base64.b64encode(data).decode("ascii")}
 
     def cards_update(self, params: dict) -> dict:
@@ -435,6 +455,20 @@ class Api:
             "syncSequence": r[2],
         } for r in rows]
         return {"items": items, "nextCursor": str(rows[-1][0]) if more and rows else None}
+
+    def reviews_latest(self, params: dict) -> dict:
+        if params.get("cardIds") is not None and params.get("deck") is not None:
+            raise invalid("cardIds and deck are mutually exclusive")
+        if params.get("cardIds") is not None:
+            ids = [entity_id(c, "cardIds") for c in params["cardIds"]] or [0]
+            latest = self.col.db.scalar(f"select max(id) from revlog where cid in ({','.join('?' * len(ids))})", *ids)
+        elif params.get("deck") is not None:
+            deck_id = self._deck_id(params["deck"])
+            latest = self.col.db.scalar("select max(id) from revlog where cid in "
+                                        "(select id from cards where did = ? or odid = ?)", deck_id, deck_id)
+        else:
+            latest = self.col.db.scalar("select max(id) from revlog")
+        return {"id": str(latest) if latest else None}
 
     def reviews_import(self, params: dict) -> dict:
         def run():

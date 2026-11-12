@@ -109,6 +109,7 @@ def test_reviews_import_list_and_schedule(api, schema):
     again = api.call("advanced.reviews.import", {"reviews": [review]})
     assert api.call("operations.get", {"operationId": again["operationId"]})["error"]["data"]["type"] == "conflict"
 
+    assert call(api, schema, "reviews.getLatestId", {"deck": {"name": "Japanese::Mining"}})["id"] == "1791633600000"
     page = call(api, schema, "reviews.list", {"deck": {"name": "Japanese::Mining"}})
     assert [(r["id"], r["rating"], r["interval"]["value"]) for r in page["items"]] == [("1791633600000", "good", 3)]
     assert call(api, schema, "reviews.list", {"cardIds": [card_id], "afterId": "1791633600000"})["items"] == []
