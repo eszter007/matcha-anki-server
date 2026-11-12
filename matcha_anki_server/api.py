@@ -1,0 +1,427 @@
+"""The AnkiConnect v1 methods Matcha Reader uses, implemented on the Anki library.
+
+Request and response shapes follow AnkiConnect's API v1 (JSON-RPC 2.0, entity ids as decimal
+strings), so the device talks to this server and to Anki desktop with AnkiConnect the same way.
+Only the subset the device needs is implemented; any other method answers "unknown method".
+"""
+from __future__ import annotations
+
+import datetime as dt
+import itertools
+import threading
+from typing import Any, Callable
+
+from anki.collection import Collection
+
+from . import ankiweb
+
+RATINGS = ["again", "hard", "good", "easy"]  # revlog ease 1..4
+KINDS = ["learning", "review", "relearning", "filtered", "manual", "rescheduled"]  # revlog type 0..5
+CARD_TYPES = ["new", "learning", "review", "relearning"]
+QUEUES = {0: "new", 1: "learning", 2: "review", 3: "dayLearning", 4: "preview", -1: "suspended",
+          -2: "buriedByScheduler", -3: "buriedByUser"}
+MAX_PAGE = 1000
+
+
+class RpcError(Exception):
+    """A JSON-RPC error with AnkiConnect's code and error type."""
+
+    def __init__(self, code: int, kind: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.kind = kind
+
+    def to_json(self) -> dict:
+        return {"code": self.code, "message": str(self), "data": {"type": self.kind}}
+
+
+def not_found(what: str) -> RpcError:
+    return RpcError(1001, "notFound", f"{what} not found.")
+
+
+def invalid(message: str) -> RpcError:
+    return RpcError(-32602, "invalidParams", message)
+
+
+def stamp(seconds: float) -> str:
+    return dt.datetime.fromtimestamp(seconds, dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def entity_id(value: Any, name: str) -> int:
+    try:
+        number = int(str(value))
+    except ValueError:
+        raise invalid(f"{name} must be a decimal id") from None
+    if number <= 0:
+        raise invalid(f"{name} must be positive")
+    return number
+
+
+class Api:
+    """One collection, one lock: requests run one at a time, as in Anki desktop."""
+
+    def __init__(self, collection_path: str, sync: ankiweb.SyncSettings | None):
+        self.path = collection_path
+        self.sync_settings = sync
+        self.lock = threading.Lock()
+        self.col = Collection(collection_path)
+        self.operations: dict[str, dict] = {}
+        self.op_counter = itertools.count(1)
+        self.methods: dict[str, Callable[[dict], Any]] = {
+            "api.describe": self.describe,
+            "collection.sync": self.collection_sync,
+            "operations.get": self.operations_get,
+            "decks.list": self.decks_list,
+            "noteTypes.list": self.note_types_list,
+            "noteTypes.get": self.note_types_get,
+            "notes.search": self.notes_search,
+            "notes.getMany": self.notes_get_many,
+            "notes.createMany": self.notes_create_many,
+            "notes.update": self.notes_update,
+            "cards.getMany": self.cards_get_many,
+            "reviews.list": self.reviews_list,
+            "advanced.reviews.import": self.reviews_import,
+            "advanced.cards.update": self.cards_update,
+            "scheduling.setDueDate": self.set_due_date,
+        }
+
+    def call(self, method: str, params: dict) -> Any:
+        handler = self.methods.get(method)
+        if handler is None:
+            raise RpcError(-32601, "methodNotFound", f"Unknown method: {method}")
+        if not isinstance(params, dict):
+            raise invalid("params must be an object")
+        with self.lock:
+            return handler(params)
+
+    # --- discovery and operations
+
+    def describe(self, _params: dict) -> dict:
+        from anki.buildinfo import version
+
+        return {
+            "apiMajor": 1,
+            "ankiVersion": version,
+            "schema": {},
+            "methods": [{"name": name, "available": True, "reason": None} for name in sorted(self.methods)],
+            "limits": {"maxRequestBytes": 4 * 1024 * 1024, "maxBatchItems": MAX_PAGE, "maxPageSize": MAX_PAGE,
+                       "operationRetentionSeconds": 3600, "maxActiveOperations": 1, "maxRetainedOperations": 64,
+                       "maxMediaBytes": 1},
+        }
+
+    def _operation(self, method: str, run: Callable[[], Any]) -> dict:
+        """Runs a long operation at once and keeps its result for operations.get."""
+        op_id = f"op-{next(self.op_counter)}"
+        now = stamp(dt.datetime.now().timestamp())
+        record = {"operationId": op_id, "method": method, "session": None, "createdAt": now, "updatedAt": now,
+                  "cancellable": False, "progress": None}
+        try:
+            record["result"] = run()
+            record["state"] = "succeeded"
+        except RpcError as error:
+            record["error"] = error.to_json()
+            record["state"] = "failed"
+        self.operations[op_id] = record
+        if len(self.operations) > 64:  # keep only recent ones
+            self.operations.pop(next(iter(self.operations)))
+        return {"operationId": op_id, "method": method, "session": None}
+
+    def operations_get(self, params: dict) -> dict:
+        record = self.operations.get(str(params.get("operationId", "")))
+        if record is None:
+            raise not_found("Operation")
+        return record
+
+    def collection_sync(self, params: dict) -> dict:
+        def run():
+            if self.sync_settings is None:
+                raise RpcError(1011, "authenticationRequired", "No AnkiWeb account is configured on the server.")
+            self.col = ankiweb.sync(self.col, self.sync_settings)
+            return {"collectionComplete": True, "mediaComplete": not params.get("includeMedia", True)}
+
+        return self._operation("collection.sync", run)
+
+    # --- decks and note types
+
+    def decks_list(self, _params: dict) -> list:
+        out = []
+        for d in self.col.decks.all_names_and_ids():
+            deck = self.col.decks.get(d.id)
+            filtered = bool(deck.get("dyn"))
+            out.append({"id": str(d.id), "name": d.name, "kind": "filtered" if filtered else "normal",
+                        "presetId": None if filtered else str(deck.get("conf", 1))})
+        return sorted(out, key=lambda d: d["name"])
+
+    def note_types_list(self, _params: dict) -> list:
+        return sorted(({"id": str(m.id), "name": m.name} for m in self.col.models.all_names_and_ids()),
+                      key=lambda m: m["name"])
+
+    def _note_type(self, ref: Any) -> dict:
+        if not isinstance(ref, dict):
+            raise invalid("noteType must be a reference")
+        if "id" in ref:
+            model = self.col.models.get(entity_id(ref["id"], "noteType.id"))
+        else:
+            model = self.col.models.by_name(str(ref.get("name", "")))
+        if not model:
+            raise not_found("Note type")
+        return model
+
+    def note_types_get(self, params: dict) -> dict:
+        m = self._note_type(params.get("noteType"))
+        return {
+            "id": str(m["id"]),
+            "name": m["name"],
+            "kind": "cloze" if m.get("type") == 1 else "normal",
+            "fields": [{"name": f["name"]} for f in m["flds"]],
+            "templates": [{"name": t["name"], "questionHtml": t["qfmt"], "answerHtml": t["afmt"]} for t in m["tmpls"]],
+            "css": m.get("css", ""),
+            "sortField": m["flds"][m.get("sortf", 0)]["name"],
+            "latexHeader": m.get("latexPre", ""),
+            "latexFooter": m.get("latexPost", ""),
+            "latexSvg": bool(m.get("latexsvg", False)),
+            "modifiedAt": stamp(m.get("mod", 0)),
+        }
+
+    # --- notes
+
+    def _deck_id(self, ref: Any) -> int:
+        if not isinstance(ref, dict):
+            raise invalid("deck must be a reference")
+        if "id" in ref:
+            deck_id = entity_id(ref["id"], "deck.id")
+            if not self.col.decks.get(deck_id, default=False):
+                raise not_found("Deck")
+            return deck_id
+        name = str(ref.get("name", ""))
+        if not name:
+            raise invalid("deck needs an id or a name")
+        found = self.col.decks.id_for_name(name)
+        if found is None:
+            raise not_found("Deck")
+        return found
+
+    def _note_json(self, note) -> dict:
+        model = note.note_type()
+        return {"id": str(note.id), "noteType": {"id": str(model["id"]), "name": model["name"]},
+                "fields": dict(note.items()), "tags": list(note.tags),
+                "cardIds": [str(c) for c in note.card_ids()], "modifiedAt": stamp(note.mod)}
+
+    def notes_search(self, params: dict) -> dict:
+        query = params.get("query")
+        if not isinstance(query, str):
+            raise invalid("query must be a string")
+        limit = max(1, min(int(params.get("limit", 100)), MAX_PAGE))
+        offset = int(params.get("cursor") or 0)
+        try:
+            ids = self.col.find_notes(query)
+        except Exception as error:  # Anki raises on malformed searches
+            raise RpcError(1013, "invalidSearch", str(error)) from None
+        page = ids[offset:offset + limit]
+        more = offset + limit < len(ids)
+        return {"ids": [str(i) for i in page], "nextCursor": str(offset + limit) if more else None}
+
+    def notes_get_many(self, params: dict) -> dict:
+        items = []
+        for index, raw in enumerate(params.get("ids") or []):
+            try:
+                items.append({"index": index, "result": self._note_json(self.col.get_note(entity_id(raw, "id")))})
+            except RpcError as error:
+                items.append({"index": index, "error": error.to_json()})
+            except Exception:
+                items.append({"index": index, "error": not_found("Note").to_json()})
+        return {"items": items}
+
+    def notes_create_many(self, params: dict) -> dict:
+        from anki.notes import NoteFieldsCheckResult
+
+        items = []
+        for index, spec in enumerate(params.get("notes") or []):
+            try:
+                model = self._note_type(spec.get("noteType"))
+                deck_id = self._deck_id(spec.get("deck"))
+                note = self.col.new_note(model)
+                fields = spec.get("fields") or {}
+                for name, value in fields.items():
+                    if name not in note:
+                        raise RpcError(1002, "validationFailed", f"No field named {name}.")
+                    note[name] = str(value)
+                note.tags = [str(t) for t in spec.get("tags") or []]
+                allow_dupes = bool((spec.get("duplicates") or {}).get("allow", False))
+                check = note.fields_check()
+                if check == NoteFieldsCheckResult.EMPTY:
+                    raise RpcError(1002, "validationFailed", "The first field is empty.")
+                if check == NoteFieldsCheckResult.DUPLICATE and not allow_dupes:
+                    raise RpcError(1002, "validationFailed", "Duplicate note.")
+                self.col.add_note(note, deck_id)
+                items.append({"index": index, "result": {"noteId": str(note.id),
+                                                         "cardIds": [str(c) for c in note.card_ids()]}})
+            except RpcError as error:
+                items.append({"index": index, "error": error.to_json()})
+        return {"items": items}
+
+    def notes_update(self, params: dict) -> dict:
+        try:
+            note = self.col.get_note(entity_id(params.get("id"), "id"))
+        except RpcError:
+            raise
+        except Exception:
+            raise not_found("Note") from None
+        patch = params.get("patch") or {}
+        for name, value in (patch.get("fields") or {}).items():
+            if name not in note:
+                raise RpcError(1002, "validationFailed", f"No field named {name}.")
+            note[name] = str(value)
+        if "tags" in patch:
+            note.tags = [str(t) for t in patch["tags"]]
+        self.col.update_note(note)
+        return self._note_json(self.col.get_note(note.id))
+
+    # --- cards and scheduling
+
+    def _card_json(self, card) -> dict:
+        deck = self.col.decks.get(card.did)
+        home = self.col.decks.get(card.odid) if card.odid else None
+        memory = card.memory_state
+        due = {"kind": "position", "position": card.due} if card.queue == 0 else {"kind": "day", "day": card.due}
+        return {
+            "id": str(card.id), "noteId": str(card.nid),
+            "deck": {"id": str(card.did), "name": deck["name"]},
+            "homeDeck": {"id": str(card.odid), "name": home["name"]} if home else None,
+            "templateIndex": card.ord, "flags": card.flags, "modifiedAt": stamp(card.mod),
+            "scheduling": {
+                "type": CARD_TYPES[card.type], "queue": QUEUES.get(card.queue, "new"), "due": due,
+                "intervalDays": max(card.ivl, 0), "learningIntervalSeconds": None, "remainingSteps": card.left % 1000,
+                "repetitions": card.reps, "lapses": card.lapses, "sm2EasePermille": card.factor,
+                "fsrsMemory": {"difficulty": memory.difficulty, "stabilityDays": memory.stability} if memory else None,
+                "desiredRetention": card.desired_retention,
+            },
+        }
+
+    def _card(self, raw: Any):
+        try:
+            return self.col.get_card(entity_id(raw, "cardId"))
+        except RpcError:
+            raise
+        except Exception:
+            raise not_found("Card") from None
+
+    def cards_get_many(self, params: dict) -> dict:
+        items = []
+        for index, raw in enumerate(params.get("ids") or []):
+            try:
+                items.append({"index": index, "result": self._card_json(self._card(raw))})
+            except RpcError as error:
+                items.append({"index": index, "error": error.to_json()})
+        return {"items": items}
+
+    def cards_update(self, params: dict) -> dict:
+        from anki.cards import FSRSMemoryState
+
+        card = self._card(params.get("cardId"))
+        patch = params.get("patch") or {}
+        if "fsrsMemory" in patch:
+            memory = patch["fsrsMemory"]
+            card.memory_state = None if memory is None else FSRSMemoryState(
+                stability=float(memory["stabilityDays"]), difficulty=float(memory["difficulty"]))
+        for key, attr in (("intervalDays", "ivl"), ("sm2EasePermille", "factor"), ("repetitions", "reps"),
+                          ("lapses", "lapses")):
+            if key in patch:
+                setattr(card, attr, int(patch[key]))
+        self.col.update_card(card)
+        return self._card_json(self.col.get_card(card.id))
+
+    def set_due_date(self, params: dict) -> dict:
+        ids = [entity_id(i, "cardIds") for i in params.get("cardIds") or []]
+        days = params.get("days")
+        if not isinstance(days, str) or not days:
+            raise invalid("days must be a string such as \"3\"")
+        items = []
+        for index, card_id in enumerate(ids):
+            try:
+                self._card(card_id)
+                self.col.sched.set_due_date([card_id], days)
+                items.append({"index": index, "result": {"changed": True}})
+            except RpcError as error:
+                items.append({"index": index, "error": error.to_json()})
+        return {"items": items}
+
+    # --- review history
+
+    @staticmethod
+    def _interval(ivl: int) -> dict:
+        return {"value": ivl, "unit": "days"} if ivl >= 0 else {"value": -ivl, "unit": "seconds"}
+
+    def reviews_list(self, params: dict) -> dict:
+        if params.get("cardIds") is not None and params.get("deck") is not None:
+            raise invalid("cardIds and deck are mutually exclusive")
+        where, args = [], []
+        if params.get("cardIds") is not None:
+            ids = [entity_id(c, "cardIds") for c in params["cardIds"]]
+            if not ids:
+                return {"items": [], "nextCursor": None}
+            where.append(f"cid in ({','.join('?' * len(ids))})")
+            args += ids
+        elif params.get("deck") is not None:
+            deck_id = self._deck_id(params["deck"])
+            deck_ids = [deck_id]
+            if params.get("includeChildren"):
+                deck_ids = list(self.col.decks.deck_and_child_ids(deck_id))
+            where.append(f"cid in (select id from cards where did in ({','.join('?' * len(deck_ids))}) "
+                         f"or odid in ({','.join('?' * len(deck_ids))}))")
+            args += deck_ids + deck_ids
+        after = params.get("cursor") or params.get("afterId")
+        if after is not None:
+            where.append("id > ?")
+            args.append(entity_id(after, "afterId"))
+        if params.get("includeManual") is False:
+            where.append("type != 4")
+        limit = max(1, min(int(params.get("limit", 100)), MAX_PAGE))
+        sql = "select id, cid, usn, ease, ivl, lastIvl, factor, time, type from revlog"
+        if where:
+            sql += " where " + " and ".join(where)
+        rows = self.col.db.all(sql + " order by id limit ?", *args, limit + 1)
+        more = len(rows) > limit
+        rows = rows[:limit]
+        items = [{
+            "id": str(r[0]), "cardId": str(r[1]), "answeredAt": stamp(r[0] / 1000),
+            "rating": RATINGS[r[3] - 1] if 1 <= r[3] <= 4 else None,
+            "interval": self._interval(r[4]), "previousInterval": self._interval(r[5]),
+            "factor": {"encoding": "fsrsNormalizedDifficulty" if 0 < r[6] <= 100 and r[8] != 4 and
+                       self.col.get_config("fsrs", False) else "legacySm2EasePermille", "value": max(r[6], 0)},
+            "elapsedMs": max(r[7], 0), "kind": KINDS[r[8]] if 0 <= r[8] < len(KINDS) else "manual",
+            "syncSequence": r[2],
+        } for r in rows]
+        return {"items": items, "nextCursor": str(rows[-1][0]) if more and rows else None}
+
+    def reviews_import(self, params: dict) -> dict:
+        def run():
+            records = params.get("reviews") or []
+            rows = []
+            seen = set()
+            for i, rec in enumerate(records):
+                review_id = entity_id(rec.get("id"), f"reviews[{i}].id")
+                card_id = entity_id(rec.get("cardId"), f"reviews[{i}].cardId")
+                if review_id in seen or self.col.db.scalar("select 1 from revlog where id = ?", review_id):
+                    raise RpcError(1008, "conflict", f"Review {review_id} already exists.")
+                seen.add(review_id)
+                self._card(card_id)
+                rating = rec.get("rating")
+                ease = RATINGS.index(rating) + 1 if rating in RATINGS else 0
+                kind = rec.get("kind", "review")
+                if kind not in KINDS:
+                    raise invalid(f"reviews[{i}].kind is not a review kind")
+
+                def ivl(value):
+                    value = value or {"value": 0, "unit": "days"}
+                    return int(value["value"]) if value.get("unit") == "days" else -int(value["value"])
+
+                factor = int((rec.get("factor") or {}).get("value", 0))
+                rows.append((review_id, card_id, -1, ease, ivl(rec.get("interval")), ivl(rec.get("previousInterval")),
+                             factor, int(rec.get("elapsedMs", 0)), KINDS.index(kind)))
+            for row in rows:
+                self.col.db.execute("insert into revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) "
+                                    "values (?, ?, ?, ?, ?, ?, ?, ?, ?)", *row)
+            return {"changedCount": len(rows)}
+
+        return self._operation("advanced.reviews.import", run)

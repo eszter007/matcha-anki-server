@@ -1,0 +1,13 @@
+# Home server / NAS: `docker compose up -d`. Put the secrets in a .env file next to this one.
+services:
+  matcha-anki:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      MATCHA_TOKEN: ${MATCHA_TOKEN}
+      ANKIWEB_USERNAME: ${ANKIWEB_USERNAME}
+      ANKIWEB_PASSWORD: ${ANKIWEB_PASSWORD}
+    volumes:
+      - ./data:/data
