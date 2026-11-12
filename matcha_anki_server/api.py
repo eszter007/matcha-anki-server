@@ -75,10 +75,13 @@ class Api:
             "noteTypes.list": self.note_types_list,
             "noteTypes.get": self.note_types_get,
             "notes.search": self.notes_search,
+            "cards.search": self.cards_search,
             "notes.getMany": self.notes_get_many,
             "notes.createMany": self.notes_create_many,
             "notes.update": self.notes_update,
             "cards.getMany": self.cards_get_many,
+            "cards.render": self.cards_render,
+            "media.get": self.media_get,
             "reviews.list": self.reviews_list,
             "advanced.reviews.import": self.reviews_import,
             "advanced.cards.update": self.cards_update,
@@ -221,6 +224,20 @@ class Api:
         more = offset + limit < len(ids)
         return {"ids": [str(i) for i in page], "nextCursor": str(offset + limit) if more else None}
 
+    def cards_search(self, params: dict) -> dict:
+        query = params.get("query")
+        if not isinstance(query, str):
+            raise invalid("query must be a string")
+        limit = max(1, min(int(params.get("limit", 100)), MAX_PAGE))
+        offset = int(params.get("cursor") or 0)
+        try:
+            ids = self.col.find_cards(query)
+        except Exception as error:
+            raise RpcError(1013, "invalidSearch", str(error)) from None
+        page = ids[offset:offset + limit]
+        more = offset + limit < len(ids)
+        return {"ids": [str(i) for i in page], "nextCursor": str(offset + limit) if more else None}
+
     def notes_get_many(self, params: dict) -> dict:
         items = []
         for index, raw in enumerate(params.get("ids") or []):
@@ -314,6 +331,31 @@ class Api:
             except RpcError as error:
                 items.append({"index": index, "error": error.to_json()})
         return {"items": items}
+
+    def cards_render(self, params: dict) -> dict:
+        """The card's front and back as Anki renders them, with the note type's CSS."""
+        import re
+
+        card = self._card(params.get("id"))
+        av = re.compile(r"\[anki:play:[qa]:\d+\]")  # audio has no place on an e-ink card
+        question = av.sub("", card.question(reload=True))
+        answer = av.sub("", card.answer())
+        return {"cardId": str(card.id), "questionHtml": question, "answerHtml": answer,
+                "css": card.note_type().get("css", "")}
+
+    def media_get(self, params: dict) -> dict:
+        import base64
+        import os
+
+        name = str(params.get("filename", ""))
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            raise invalid("filename must be a plain media file name")
+        path = os.path.join(self.col.media.dir(), name)
+        if not os.path.isfile(path):
+            raise not_found("Media file")
+        with open(path, "rb") as f:
+            data = f.read()
+        return {"filename": name, "data": base64.b64encode(data).decode("ascii")}
 
     def cards_update(self, params: dict) -> dict:
         from anki.cards import FSRSMemoryState

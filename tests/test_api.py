@@ -127,3 +127,24 @@ def test_unknown_method(api):
     with pytest.raises(RpcError) as e:
         api.call("notes.delete", {})
     assert e.value.code == -32601
+
+
+def test_cards_search_render_and_media(api, schema):
+    import base64
+    import os
+
+    created = add(api, schema)["result"]
+    ids = call(api, schema, "cards.search", {"query": '"deck:Japanese::Mining"'})["ids"]
+    assert ids == created["cardIds"]
+    with open(os.path.join(api.col.media.dir(), "pic.png"), "wb") as f:
+        f.write(b"\x89PNG fake")
+    note = api.col.get_note(int(created["noteId"]))
+    note["Sentence"] = '<b>木漏れ日</b><img src="pic.png"> [sound:x.mp3]'
+    api.col.update_note(note)
+    r = call(api, schema, "cards.render", {"id": ids[0]})
+    assert "<b>木漏れ日</b>" in r["questionHtml"] and "anki:play" not in r["questionHtml"]
+    assert "<ruby>" in r["answerHtml"]
+    media = call(api, schema, "media.get", {"filename": "pic.png"})
+    assert base64.b64decode(media["data"]) == b"\x89PNG fake"
+    with pytest.raises(RpcError):
+        api.call("media.get", {"filename": "../collection.anki2"})
