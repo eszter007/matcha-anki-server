@@ -133,6 +133,9 @@ class Api:
             "cards.getMany": self.cards_get_many,
             "cards.render": self.cards_render,
             "cards.setSuspended": self.cards_set_suspended,
+            "cards.move": self.cards_move,
+            "decks.create": self.decks_create,
+            "noteTypes.create": self.note_types_create,
             "tags.add": self.tags_add,
             "media.get": self.media_get,
             "reviews.list": self.reviews_list,
@@ -209,6 +212,14 @@ class Api:
                         "presetId": None if filtered else str(deck.get("conf", 1))})
         return sorted(out, key=lambda d: d["name"])
 
+    def decks_create(self, params: dict) -> dict:
+        name = str(params.get("name") or "").strip()
+        if not name:
+            raise invalid("name is required")
+        deck_id = self.col.decks.id(name, create=True)
+        deck = self.col.decks.get(deck_id)
+        return {"id": str(deck_id), "name": deck["name"], "kind": "normal", "presetId": str(deck.get("conf", 1))}
+
     def deck_presets_get(self, params: dict) -> dict:
         ref = params.get("preset") or {}
         if "id" in ref:
@@ -267,6 +278,29 @@ class Api:
         if not model:
             raise not_found("Note type")
         return model
+
+    def note_types_create(self, params: dict) -> dict:
+        name = str(params.get("name") or "").strip()
+        fields = params.get("fields") or []
+        templates = params.get("templates") or []
+        if not name or not fields or not templates:
+            raise invalid("name, fields and templates are required")
+        if self.col.models.by_name(name):
+            raise RpcError(1003, "conflict", f"A note type named {name} exists.")
+        mm = self.col.models
+        model = mm.new(name)
+        if params.get("kind") == "cloze":
+            model["type"] = 1
+        for f in fields:
+            mm.add_field(model, mm.new_field(str(f.get("name"))))
+        for t in templates:
+            tmpl = mm.new_template(str(t.get("name")))
+            tmpl["qfmt"] = str(t.get("questionHtml", ""))
+            tmpl["afmt"] = str(t.get("answerHtml", ""))
+            mm.add_template(model, tmpl)
+        model["css"] = str(params.get("css", ""))
+        mm.add(model)
+        return self.note_types_get({"noteType": {"name": name}})
 
     def note_types_get(self, params: dict) -> dict:
         m = self._note_type(params.get("noteType"))
@@ -393,6 +427,12 @@ class Api:
         return self._note_json(self.col.get_note(note.id))
 
     # --- cards and scheduling
+
+    def cards_move(self, params: dict) -> dict:
+        deck_id = self._deck_id(params.get("deck"))
+        ids = [self._card(raw).id for raw in params.get("ids") or []]
+        self.col.set_deck(ids, deck_id)
+        return {"changedCount": len(ids)}
 
     def cards_set_suspended(self, params: dict) -> dict:
         suspend = bool(params.get("suspended"))

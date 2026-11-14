@@ -220,3 +220,18 @@ def test_media_get_shrinks_transparent_onto_white(api, schema):
     data = base64.b64decode(call(api, schema, "media.get", {"filename": "clear.png"})["data"])
     with Image.open(io.BytesIO(data)) as im:
         assert im.getpixel((10, 10)) == 255
+
+
+def test_deck_note_type_and_move(api):
+    deck = api.call("decks.create", {"name": "Matcha::日本語"})
+    assert deck["name"] == "Matcha::日本語"
+    assert api.call("decks.create", {"name": "Matcha::日本語"})["id"] == deck["id"]
+    nt = api.call("noteTypes.create", {"name": "Mined", "fields": [{"name": "Word"}, {"name": "Sentence"}],
+                                       "templates": [{"name": "Card 1", "questionHtml": "{{Sentence}}",
+                                                      "answerHtml": "{{Word}}"}], "css": ".card{}"})
+    assert [f["name"] for f in nt["fields"]] == ["Word", "Sentence"]
+    made = api.call("notes.createMany", {"notes": [{"noteType": {"name": "Mined"}, "deck": {"name": "Default"},
+                                                    "fields": {"Word": "犬", "Sentence": "犬がいる"}}]})
+    card = made["items"][0]["result"]["cardIds"][0]
+    api.call("cards.move", {"ids": [card], "deck": {"id": deck["id"]}})
+    assert api.call("cards.getMany", {"ids": [card]})["items"][0]["result"]["deck"]["id"] == deck["id"]
