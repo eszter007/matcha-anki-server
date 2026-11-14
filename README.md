@@ -109,6 +109,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest -q
 ```
 
+## Support
+
+The server is free. If it saved you an evening, a coffee keeps it going: [Buy me a coffee](https://buymeacoffee.com/eszter007) or [GitHub Sponsors](https://github.com/sponsors/eszter007).
+
 ## Licence
 
 This server's own code is licensed under [CC BY-NC-SA 4.0](LICENSE): you may use, change and share it for non-commercial purposes, with credit, and changed versions must be shared under the same licence. For commercial use, ask first.
