@@ -108,3 +108,9 @@ To update the server, build the image again and restart the VM (`gcloud compute 
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest -q
 ```
+
+## Licence
+
+This server's own code is licensed under [CC BY-NC-SA 4.0](LICENSE): you may use, change and share it for non-commercial purposes, with credit, and changed versions must be shared under the same licence. For commercial use, ask first.
+
+It uses the [Anki](https://github.com/ankitects/anki) library, which keeps its own licence (AGPL-3.0).
