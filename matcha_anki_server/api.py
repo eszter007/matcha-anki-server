@@ -471,6 +471,8 @@ class Api:
         """The card's front and back as Anki renders them, with the note type's CSS."""
         import re
 
+        from .device_html import for_device
+
         card = self._card(params.get("id"))
         css = card.note_type().get("css", "")
         av = re.compile(r"\[anki:play:[qa]:\d+\]")  # audio has no place on an e-ink card
@@ -488,7 +490,7 @@ class Api:
 
         def clean(html: str, answer: bool = False) -> str:
             html = type_in.sub(expected if answer else "", html)
-            return scripts.sub("", av.sub("", html.replace(inline_css, "")))
+            return for_device(scripts.sub("", av.sub("", html.replace(inline_css, ""))))
 
         return {"cardId": str(card.id), "questionHtml": clean(card.question(reload=True)),
                 "answerHtml": clean(card.answer(), answer=True), "css": css}
