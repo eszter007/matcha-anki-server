@@ -64,6 +64,39 @@ def stamp(seconds: float) -> str:
     return dt.datetime.fromtimestamp(seconds, dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def shrink_image(data: bytes, name: str, max_side: int = 800) -> bytes:
+    """A PNG or JPEG larger than an e-ink screen, scaled down in grayscale in its own format, so
+    the reader stores and decodes far fewer bytes. Anything else, or anything Pillow cannot read,
+    stays as it was."""
+    import io
+
+    lower = name.lower()
+    fmt = "PNG" if lower.endswith(".png") else "JPEG" if lower.endswith((".jpg", ".jpeg")) else None
+    if fmt is None:
+        return data
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as im:
+            if max(im.size) <= max_side:
+                return data
+            # Transparent parts on white, as the reader shows them, not black.
+            if im.mode in ("RGBA", "LA", "P"):
+                im = im.convert("RGBA")
+                background = Image.new("RGBA", im.size, (255, 255, 255, 255))
+                im = Image.alpha_composite(background, im)
+            im = im.convert("L")
+            im.thumbnail((max_side, max_side))
+            out = io.BytesIO()
+            if fmt == "JPEG":
+                im.save(out, format="JPEG", quality=85, optimize=True)
+            else:
+                im.save(out, format="PNG", optimize=True)
+            return out.getvalue() if out.tell() < len(data) else data
+    except Exception:
+        return data
+
+
 def entity_id(value: Any, name: str) -> int:
     try:
         number = int(str(value))
@@ -444,11 +477,21 @@ class Api:
         scripts = re.compile(r"<script\b.*?</script\s*>", re.S | re.I)  # the reader runs no scripts
         inline_css = f"<style>{css}</style>"  # Anki repeats the note type's CSS; it is sent once below
 
-        def clean(html: str) -> str:
+        # Type-in answers: the reader has no typing box. The front leaves the box out; the back shows
+        # the expected answer, as Anki does when nothing was typed.
+        type_in = re.compile(r"\[\[type:(?:[^\]:]*:)?([^\]]+)\]\]")
+        note = card.note()
+
+        def expected(m: re.Match) -> str:
+            name = m.group(1).strip()
+            return f'<code id="typeans">{note[name]}</code>' if name in note else ""
+
+        def clean(html: str, answer: bool = False) -> str:
+            html = type_in.sub(expected if answer else "", html)
             return scripts.sub("", av.sub("", html.replace(inline_css, "")))
 
         return {"cardId": str(card.id), "questionHtml": clean(card.question(reload=True)),
-                "answerHtml": clean(card.answer()), "css": css}
+                "answerHtml": clean(card.answer(), answer=True), "css": css}
 
     def media_get(self, params: dict) -> dict:
         import base64
@@ -464,6 +507,8 @@ class Api:
             data = f.read()
         if name.lower().endswith(".webp"):
             data = webp_to_png(data)  # e-ink readers decode PNG, not WebP
+        else:
+            data = shrink_image(data, name)
         return {"filename": name, "data": base64.b64encode(data).decode("ascii")}
 
     def cards_update(self, params: dict) -> dict:

@@ -178,3 +178,45 @@ def test_set_suspended_and_tags_add(api, schema):
     r = call(api, schema, "tags.add", {"noteIds": [nid], "tags": ["leech"]})
     assert r["items"][0]["result"]["changed"] is True
     assert api.col.get_note(int(nid)).has_tag("leech")
+
+
+def test_media_get_shrinks_large_images(api, schema):
+    import base64
+    import io
+    import os
+
+    from PIL import Image
+
+    big = io.BytesIO()
+    Image.new("RGB", (2400, 1600), (200, 30, 30)).save(big, format="PNG")
+    with open(os.path.join(api.col.media.dir(), "big.png"), "wb") as f:
+        f.write(big.getvalue())
+    data = base64.b64decode(call(api, schema, "media.get", {"filename": "big.png"})["data"])
+    with Image.open(io.BytesIO(data)) as im:
+        assert max(im.size) == 800 and im.format == "PNG"
+
+
+def test_render_type_in_answer(api, schema):
+    m = api.col.models.by_name("Basic (type in the answer)")
+    n = api.col.new_note(m)
+    n["Front"], n["Back"] = "猫", "neko"
+    api.col.add_note(n, api.col.decks.id("Japanese::Mining"))
+    r = call(api, schema, "cards.render", {"id": str(n.cards()[0].id)})
+    assert "[[type:" not in r["questionHtml"] and "[[type:" not in r["answerHtml"]
+    assert '<code id="typeans">neko</code>' in r["answerHtml"]
+
+
+def test_media_get_shrinks_transparent_onto_white(api, schema):
+    import base64
+    import io
+    import os
+
+    from PIL import Image
+
+    big = io.BytesIO()
+    Image.new("RGBA", (1600, 1600), (0, 0, 0, 0)).save(big, format="PNG")
+    with open(os.path.join(api.col.media.dir(), "clear.png"), "wb") as f:
+        f.write(big.getvalue())
+    data = base64.b64decode(call(api, schema, "media.get", {"filename": "clear.png"})["data"])
+    with Image.open(io.BytesIO(data)) as im:
+        assert im.getpixel((10, 10)) == 255
