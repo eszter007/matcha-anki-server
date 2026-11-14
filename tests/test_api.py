@@ -145,7 +145,21 @@ def test_cards_search_render_and_media(api, schema):
     r = call(api, schema, "cards.render", {"id": ids[0]})
     assert "<b>木漏れ日</b>" in r["questionHtml"] and "anki:play" not in r["questionHtml"]
     assert "<ruby>" in r["answerHtml"]
+    assert "<style>" not in r["questionHtml"] and r["css"]
     media = call(api, schema, "media.get", {"filename": "pic.png"})
     assert base64.b64decode(media["data"]) == b"\x89PNG fake"
     with pytest.raises(RpcError):
         api.call("media.get", {"filename": "../collection.anki2"})
+
+
+def test_deck_presets_get(api, schema):
+    conf = api.col.decks.get_config(1)
+    conf["new"]["perDay"] = 15
+    conf["rev"]["maxIvl"] = 200
+    api.col.decks.save(conf)
+    deck = next(d for d in call(api, schema, "decks.list", {}) if d["name"] == "Japanese::Mining")
+    r = call(api, schema, "deckPresets.get", {"preset": {"id": deck["presetId"]}})
+    assert r["settings"]["newPerDay"] == 15 and r["settings"]["maximumIntervalDays"] == 200
+    assert call(api, schema, "deckPresets.get", {"preset": {"name": r["name"]}})["id"] == r["id"]
+    with pytest.raises(RpcError):
+        api.call("deckPresets.get", {"preset": {"id": "999999"}})

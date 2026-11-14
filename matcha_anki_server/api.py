@@ -89,6 +89,7 @@ class Api:
             "collection.sync": self.collection_sync,
             "operations.get": self.operations_get,
             "decks.list": self.decks_list,
+            "deckPresets.get": self.deck_presets_get,
             "noteTypes.list": self.note_types_list,
             "noteTypes.get": self.note_types_get,
             "notes.search": self.notes_search,
@@ -172,6 +173,29 @@ class Api:
             out.append({"id": str(d.id), "name": d.name, "kind": "filtered" if filtered else "normal",
                         "presetId": None if filtered else str(deck.get("conf", 1))})
         return sorted(out, key=lambda d: d["name"])
+
+    def deck_presets_get(self, params: dict) -> dict:
+        ref = params.get("preset") or {}
+        if "id" in ref:
+            wanted = entity_id(ref["id"], "preset.id")
+            # get_config falls back to the default preset for an unknown id.
+            conf = next((c for c in self.col.decks.all_config() if c["id"] == wanted), None)
+        else:
+            conf = next((c for c in self.col.decks.all_config() if c["name"] == ref.get("name")), None)
+        if not conf:
+            raise not_found("Preset")
+        settings = {
+            "newPerDay": max(conf["new"]["perDay"], 0),
+            "reviewsPerDay": max(conf["rev"]["perDay"], 0),
+            "maximumIntervalDays": max(conf["rev"]["maxIvl"], 1),
+            "learnStepsMinutes": [m for m in conf["new"]["delays"] if m > 0],
+            "relearnStepsMinutes": [m for m in conf["lapse"]["delays"] if m > 0],
+            "leechThreshold": max(conf["lapse"]["leechFails"], 0),
+        }
+        retention = conf.get("desiredRetention")
+        if retention and 0 < retention < 1:
+            settings["desiredRetention"] = retention
+        return {"id": str(conf["id"]), "name": conf["name"], "settings": settings, "modifiedAt": stamp(conf["mod"])}
 
     def note_types_list(self, _params: dict) -> list:
         return sorted(({"id": str(m.id), "name": m.name} for m in self.col.models.all_names_and_ids()),
@@ -355,11 +379,16 @@ class Api:
         import re
 
         card = self._card(params.get("id"))
+        css = card.note_type().get("css", "")
         av = re.compile(r"\[anki:play:[qa]:\d+\]")  # audio has no place on an e-ink card
-        question = av.sub("", card.question(reload=True))
-        answer = av.sub("", card.answer())
-        return {"cardId": str(card.id), "questionHtml": question, "answerHtml": answer,
-                "css": card.note_type().get("css", "")}
+        scripts = re.compile(r"<script\b.*?</script\s*>", re.S | re.I)  # the reader runs no scripts
+        inline_css = f"<style>{css}</style>"  # Anki repeats the note type's CSS; it is sent once below
+
+        def clean(html: str) -> str:
+            return scripts.sub("", av.sub("", html.replace(inline_css, "")))
+
+        return {"cardId": str(card.id), "questionHtml": clean(card.question(reload=True)),
+                "answerHtml": clean(card.answer()), "css": css}
 
     def media_get(self, params: dict) -> dict:
         import base64
