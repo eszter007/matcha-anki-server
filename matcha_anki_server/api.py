@@ -99,6 +99,8 @@ class Api:
             "notes.update": self.notes_update,
             "cards.getMany": self.cards_get_many,
             "cards.render": self.cards_render,
+            "cards.setSuspended": self.cards_set_suspended,
+            "tags.add": self.tags_add,
             "media.get": self.media_get,
             "reviews.list": self.reviews_list,
             "advanced.reviews.import": self.reviews_import,
@@ -192,6 +194,27 @@ class Api:
             "relearnStepsMinutes": [m for m in conf["lapse"]["delays"] if m > 0],
             "leechThreshold": max(conf["lapse"]["leechFails"], 0),
         }
+        def pick(names: list, value: int, default: str) -> str:
+            return names[value] if isinstance(value, int) and 0 <= value < len(names) else default
+
+        gather = ["deck", "lowestPosition", "highestPosition", "randomNotes", "randomCards", "deckThenRandomNotes"]
+        sort = ["template", "none", "templateThenRandom", "randomNoteThenTemplate", "randomCard"]
+        review = ["day", "dayThenDeck", "deckThenDay", "intervalAscending", "intervalDescending", "easeAscending",
+                  "easeDescending", "retrievabilityAscending", "random", "added", "reverseAdded",
+                  "retrievabilityDescending"]
+        mix = ["mixed", "afterReviews", "beforeReviews"]
+        settings.update({
+            "newGatherOrder": pick(gather, conf.get("newGatherPriority", 0), "deck"),
+            "newSortOrder": pick(sort, conf.get("newSortOrder", 0), "template"),
+            "reviewOrder": pick(review, conf.get("reviewOrder", 0), "day"),
+            "newMix": pick(mix, conf.get("newMix", 0), "mixed"),
+            "buryNew": bool(conf["new"].get("bury", False)),
+            "buryReviews": bool(conf["rev"].get("bury", False)),
+            "leechAction": "tagOnly" if conf["lapse"].get("leechAction", 0) == 1 else "suspend",
+        })
+        easy = conf.get("easyDaysPercentages")
+        if isinstance(easy, list) and len(easy) == 7:
+            settings["easyDaysPercentages"] = [max(float(v), 0.0) for v in easy]
         retention = conf.get("desiredRetention")
         if retention and 0 < retention < 1:
             settings["desiredRetention"] = retention
@@ -337,6 +360,43 @@ class Api:
         return self._note_json(self.col.get_note(note.id))
 
     # --- cards and scheduling
+
+    def cards_set_suspended(self, params: dict) -> dict:
+        suspend = bool(params.get("suspended"))
+        items = []
+        for i, raw in enumerate(params.get("ids") or []):
+            try:
+                card = self._card(raw)
+            except RpcError as e:
+                items.append({"index": i, "error": e.to_json()})
+                continue
+            was = card.queue == -1
+            if suspend and not was:
+                self.col.sched.suspend_cards([card.id])
+            elif not suspend and was:
+                self.col.sched.unsuspend_cards([card.id])
+            items.append({"index": i, "result": {"changed": was != suspend}})
+        return {"items": items}
+
+    def tags_add(self, params: dict) -> dict:
+        tags = [str(t) for t in params.get("tags") or []]
+        items = []
+        for i, raw in enumerate(params.get("noteIds") or []):
+            try:
+                note = self.col.get_note(entity_id(raw, f"noteIds[{i}]"))
+            except RpcError as e:
+                items.append({"index": i, "error": e.to_json()})
+                continue
+            except Exception:
+                items.append({"index": i, "error": not_found("Note").to_json()})
+                continue
+            added = [t for t in tags if not note.has_tag(t)]
+            for t in added:
+                note.add_tag(t)
+            if added:
+                self.col.update_note(note)
+            items.append({"index": i, "result": {"changed": bool(added)}})
+        return {"items": items}
 
     def _card_json(self, card) -> dict:
         deck = self.col.decks.get(card.did)

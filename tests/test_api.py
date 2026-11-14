@@ -160,6 +160,21 @@ def test_deck_presets_get(api, schema):
     deck = next(d for d in call(api, schema, "decks.list", {}) if d["name"] == "Japanese::Mining")
     r = call(api, schema, "deckPresets.get", {"preset": {"id": deck["presetId"]}})
     assert r["settings"]["newPerDay"] == 15 and r["settings"]["maximumIntervalDays"] == 200
+    assert r["settings"]["newMix"] in ("mixed", "afterReviews", "beforeReviews")
+    assert len(r["settings"]["easyDaysPercentages"]) == 7
     assert call(api, schema, "deckPresets.get", {"preset": {"name": r["name"]}})["id"] == r["id"]
     with pytest.raises(RpcError):
         api.call("deckPresets.get", {"preset": {"id": "999999"}})
+
+
+def test_set_suspended_and_tags_add(api, schema):
+    created = add(api, schema)["result"]
+    cid, nid = created["cardIds"][0], created["noteId"]
+    r = call(api, schema, "cards.setSuspended", {"ids": [cid], "suspended": True})
+    assert r["items"][0]["result"]["changed"] is True
+    assert api.col.get_card(int(cid)).queue == -1
+    r = call(api, schema, "cards.setSuspended", {"ids": [cid, "999"], "suspended": True})
+    assert r["items"][0]["result"]["changed"] is False and "error" in r["items"][1]
+    r = call(api, schema, "tags.add", {"noteIds": [nid], "tags": ["leech"]})
+    assert r["items"][0]["result"]["changed"] is True
+    assert api.col.get_note(int(nid)).has_tag("leech")
