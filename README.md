@@ -41,6 +41,30 @@ In the reader's settings (**Settings → Connectivity → Anki Sync**, or the we
 
 Then choose **Flashcards → Sync with Anki** on the reader.
 
+## Migaku
+
+The server can also bring your Migaku decks to the reader, next to (or instead of) Anki. It signs in to Migaku with your account, keeps a copy of your Migaku collection, and answers the reader at `/migaku/api/v1` with the same API as for Anki.
+
+- **Cards:** every Migaku deck appears as `<Language>::<deck name>`, for example `French::My Cards`. Cards show the fields Migaku shows on the front and back. Japanese and Chinese readings become furigana; images come along, sound does not. Course decks show only the word and its reading: Migaku keeps the rest of a course card encrypted.
+- **Due dates:** each card's due day, interval and suspended state come from Migaku, so the reader shows cards as due when Migaku does.
+- **Reviews:** a review on the reader goes to Migaku as a Migaku review. Migaku has only pass and fail: Again counts as fail, Hard, Good and Easy as pass. The new due date is worked out with Migaku's own formula, so Migaku shows the next review where it would have put it.
+- **Mined words:** with **Save Mined Words to Migaku** on the reader, words you save become cards of Migaku's Sentence type in a deck named like the reader's (`Matcha::Français`, ...), created in that language. Migaku needs to have been used once in that language.
+- **Nothing is deleted in Migaku.** A card deleted in Migaku leaves the reader; the server never deletes anything in Migaku and never replaces your Migaku collection.
+
+Add your Migaku login to `.env`:
+
+```
+MIGAKU_EMAIL=you@example.com
+MIGAKU_PASSWORD=your-migaku-password
+TZ=Europe/Berlin
+```
+
+`TZ` should be your time zone: Migaku's day starts at 4 am local time, and the server counts days the same way.
+
+On the reader, in **Settings → Connectivity → Migaku Sync**: **Migaku Server Address** is this server's address (as for Anki), **Migaku Server Key** your `MATCHA_TOKEN`, and **Migaku Decks** the decks to sync, for example `French::My Cards`.
+
+This uses Migaku's own sync protocol, which Migaku does not document; a Migaku update can break it. It signs in only with email and password (not Google or Apple sign-in).
+
 ## Reaching it from outside your home
 
 On your home network, plain `http://` is fine. Across the internet, put the server behind HTTPS so the key is not sent in the clear, for example with [Caddy](https://caddyserver.com/) as a reverse proxy. Note that HTTPS needs more memory on the reader; on the X4 it may not fit during a sync.
@@ -99,6 +123,8 @@ To update the server, build the image again and restart the VM (`gcloud compute 
 | `MATCHA_TOKEN` | Required. The key the reader sends as `Authorization: Bearer <key>`; at least 16 characters. |
 | `ANKIWEB_USERNAME`, `ANKIWEB_PASSWORD` | Your AnkiWeb login. Without them, AnkiWeb sync is refused. |
 | `SYNC_ENDPOINT` | Optional: your own Anki sync server instead of AnkiWeb. |
+| `MIGAKU_EMAIL`, `MIGAKU_PASSWORD` | Your Migaku login, for the Migaku bridge. Without them the bridge answers but cannot sync. |
+| `TZ` | Your time zone, e.g. `Europe/Berlin`: Migaku's days start at 4 am local time. |
 | `DATA_DIR` | Where the collection is kept. Default `./data`; `/data` in the Docker image. |
 | `PORT` | Default 8080. |
 

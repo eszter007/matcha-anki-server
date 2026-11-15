@@ -9,5 +9,8 @@ services:
       MATCHA_TOKEN: ${MATCHA_TOKEN}
       ANKIWEB_USERNAME: ${ANKIWEB_USERNAME}
       ANKIWEB_PASSWORD: ${ANKIWEB_PASSWORD}
+      MIGAKU_EMAIL: ${MIGAKU_EMAIL:-}
+      MIGAKU_PASSWORD: ${MIGAKU_PASSWORD:-}
+      TZ: ${TZ:-UTC}
     volumes:
       - ./data:/data

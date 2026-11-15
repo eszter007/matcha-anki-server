@@ -1,4 +1,5 @@
-"""HTTP front: POST /api/v1 (JSON-RPC 2.0, AnkiConnect v1 style) and GET /health.
+"""HTTP front: POST /api/v1 (JSON-RPC 2.0, AnkiConnect v1 style) for the Anki collection, the same
+API at POST /migaku/api/v1 for the Migaku bridge's collection, and GET /health.
 
 Configuration comes from the environment:
 
@@ -6,6 +7,8 @@ Configuration comes from the environment:
   ANKIWEB_USERNAME   AnkiWeb (or sync server) account; without it collection.sync is refused
   ANKIWEB_PASSWORD
   SYNC_ENDPOINT      optional: a self-hosted Anki sync server instead of AnkiWeb
+  MIGAKU_EMAIL       Migaku account for the Migaku bridge; without it the bridge's collection.sync
+  MIGAKU_PASSWORD    is refused
   DATA_DIR           where the collection lives (default ./data); may be temporary
   PORT               default 8080 (Cloud Run sets it)
 """
@@ -18,14 +21,15 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import ankiweb
+from . import ankiweb, migaku_bridge
 from .api import Api, RpcError
 
 MAX_BODY = 4 * 1024 * 1024
 log = logging.getLogger("matcha_anki_server")
 
 
-def make_handler(api: Api, token: str):
+def make_handler(apis: dict[str, Api], token: str):
+    """apis: request path (no trailing slash) to the Api that answers it."""
     class Handler(BaseHTTPRequestHandler):
         server_version = "MatchaAnkiServer/1"
 
@@ -48,7 +52,8 @@ def make_handler(api: Api, token: str):
                 self._send(404)
 
         def do_POST(self):
-            if self.path.rstrip("/") != "/api/v1":
+            api = apis.get(self.path.rstrip("/"))
+            if api is None:
                 self._send(404)
                 return
             # Same transport rules as AnkiConnect: empty bodies for 401 and 413.
@@ -108,8 +113,11 @@ def main() -> int:
     else:
         log.warning("No ANKIWEB_USERNAME: the collection stays on this server only.")
     api = Api(os.path.join(data_dir, "collection.anki2"), settings)
+    migaku_api = migaku_bridge.make_api(os.path.join(data_dir, "migaku"), os.environ.get("MIGAKU_EMAIL", ""),
+                                        os.environ.get("MIGAKU_PASSWORD", ""))
     port = int(os.environ.get("PORT", "8080"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(api, token))
+    server = ThreadingHTTPServer(("0.0.0.0", port),
+                                 make_handler({"/api/v1": api, "/migaku/api/v1": migaku_api}, token))
     log.info("Listening on port %d", port)
     try:
         server.serve_forever()
@@ -117,6 +125,7 @@ def main() -> int:
         pass
     finally:
         api.col.close()
+        migaku_api.col.close()
     return 0
 
 
