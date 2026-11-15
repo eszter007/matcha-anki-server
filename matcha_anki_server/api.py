@@ -110,9 +110,17 @@ def entity_id(value: Any, name: str) -> int:
 class Api:
     """One collection, one lock: requests run one at a time, as in Anki desktop."""
 
-    def __init__(self, collection_path: str, sync: ankiweb.SyncSettings | None):
+    def __init__(self, collection_path: str, sync: ankiweb.SyncSettings | None,
+                 syncer: Callable[[Collection], Collection] | None = None, service: str = "AnkiWeb",
+                 media_source: Callable[[Collection, str], bytes | None] | None = None):
+        """syncer, when given, replaces the AnkiWeb sync (the Migaku bridge); service names the
+        remote in the error a device sees when neither is configured. media_source fetches a media
+        file the collection does not hold yet (the bridge's images, kept by Migaku)."""
         self.path = collection_path
         self.sync_settings = sync
+        self.syncer = syncer
+        self.service = service
+        self.media_source = media_source
         self.lock = threading.Lock()
         self.col = Collection(collection_path)
         self.operations: dict[str, dict] = {}
@@ -194,9 +202,13 @@ class Api:
 
     def collection_sync(self, params: dict) -> dict:
         def run():
-            if self.sync_settings is None:
-                raise RpcError(1011, "authenticationRequired", "No AnkiWeb account is configured on the server.")
-            self.col = ankiweb.sync(self.col, self.sync_settings)
+            if self.syncer is not None:
+                self.col = self.syncer(self.col)
+            elif self.sync_settings is not None:
+                self.col = ankiweb.sync(self.col, self.sync_settings)
+            else:
+                raise RpcError(1011, "authenticationRequired",
+                               f"No {self.service} account is configured on the server.")
             return {"collectionComplete": True, "mediaComplete": not params.get("includeMedia", True)}
 
         return self._operation("collection.sync", run)
@@ -543,6 +555,10 @@ class Api:
         if not name or "/" in name or "\\" in name or name.startswith("."):
             raise invalid("filename must be a plain media file name")
         path = os.path.join(self.col.media.dir(), name)
+        if not os.path.isfile(path) and self.media_source is not None:
+            fetched = self.media_source(self.col, name)
+            if fetched:
+                self.col.media.write_data(name, fetched)
         if not os.path.isfile(path):
             raise not_found("Media file")
         with open(path, "rb") as f:

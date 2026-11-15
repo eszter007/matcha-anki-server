@@ -85,7 +85,7 @@ def test_round_trip(tmp_path, sync_server):
     settings = ankiweb.SyncSettings("user", "pass", sync_server, str(tmp_path / "auth.json"))
     api = Api(str(tmp_path / "server.anki2"), settings)
     port = free_port()
-    http = ThreadingHTTPServer(("127.0.0.1", port), make_handler(api, TOKEN))
+    http = ThreadingHTTPServer(("127.0.0.1", port), make_handler({"/api/v1": api}, TOKEN))
     threading.Thread(target=http.serve_forever, daemon=True).start()
     try:
         with pytest.raises(urllib.error.HTTPError) as denied:
