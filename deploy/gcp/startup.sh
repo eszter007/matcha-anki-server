@@ -1,7 +1,9 @@
 #!/bin/bash
 # Startup script for a matcha-anki-server VM on Google Compute Engine (Debian 12): runs on every
 # boot and is safe to run again. The image comes from the VM's `matcha-image` metadata value; the
-# key and the AnkiWeb login from Secret Manager (matcha-token, ankiweb-username, ankiweb-password).
+# key and the AnkiWeb and Migaku logins from Secret Manager (matcha-token, ankiweb-username,
+# ankiweb-password, migaku-email, migaku-password; the logins are optional), and the time zone
+# from the optional `matcha-tz` metadata value (default UTC).
 # Caddy serves it over HTTPS at <external-ip>.sslip.io. See README.md, "Google Cloud".
 set -euo pipefail
 meta() {
@@ -20,6 +22,10 @@ secret() { gcloud secrets versions access latest --secret="$1" 2>/dev/null || tr
 TOKEN=$(secret matcha-token)
 AW_USER=$(secret ankiweb-username)
 AW_PASS=$(secret ankiweb-password)
+MG_EMAIL=$(secret migaku-email)
+MG_PASS=$(secret migaku-password)
+TZ_NAME=$(meta attributes/matcha-tz || true)
+case "$TZ_NAME" in *"<"*|"") TZ_NAME=UTC ;; esac
 
 gcloud auth configure-docker "$REGISTRY" --quiet
 docker pull "$IMAGE"
@@ -31,6 +37,7 @@ docker rm -f matcha caddy >/dev/null 2>&1 || true
 docker run -d --name matcha --network matcha --restart unless-stopped \
   -v /srv/matcha-data:/data \
   -e MATCHA_TOKEN="$TOKEN" -e ANKIWEB_USERNAME="$AW_USER" -e ANKIWEB_PASSWORD="$AW_PASS" \
+  -e MIGAKU_EMAIL="$MG_EMAIL" -e MIGAKU_PASSWORD="$MG_PASS" -e TZ="$TZ_NAME" \
   "$IMAGE"
 
 IP=$(meta network-interfaces/0/access-configs/0/external-ip)
