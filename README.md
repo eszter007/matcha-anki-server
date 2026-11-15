@@ -89,12 +89,7 @@ gcloud secrets create ankiweb-username --data-file=- --project PROJECT
 gcloud secrets create ankiweb-password --data-file=- --project PROJECT
 ```
 
-For the Migaku bridge, add your Migaku login the same way (both optional), and set your time zone on the VM with `--metadata matcha-tz=Europe/Berlin` when you create it (default UTC):
-
-```bash
-gcloud secrets create migaku-email --data-file=- --project PROJECT
-gcloud secrets create migaku-password --data-file=- --project PROJECT
-```
+To add or change the AnkiWeb and Migaku logins and the time zone later, run `deploy/gcp/set-logins.sh PROJECT`. It asks for each value (passwords hidden as you type), stores them in Secret Manager, and can restart the server. Migaku's day starts at 4 am local time, so set your time zone if you use the Migaku bridge (default UTC).
 
 Let the VM's service account read them and the image:
 
