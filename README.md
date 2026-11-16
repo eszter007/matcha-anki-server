@@ -32,14 +32,17 @@ The server listens on port 8080. The collection is kept in `./data`. `.env` and 
 
 ## Set up the reader
 
-In the reader's settings (**Settings → Connectivity → Anki Sync**, or the web settings page in **File Transfer**):
+In the reader's settings (**Settings → Connectivity → Flashcards Sync**, or the web settings page in **File Transfer**):
 
-- **Anki Address:** `http://<server address>:8080`, or your `https://` address (see below).
-- **Anki Key:** your `MATCHA_TOKEN`.
+- **Use Sync Server:** **On**.
+- **Server Address:** `http://<server address>:8080`, or your `https://` address (see below).
+- **Server Key:** your `MATCHA_TOKEN`.
+- **Anki Server:** **Sync Server**.
 - **Anki Decks:** the decks to sync, separated by commas.
-- **Sync AnkiWeb Too:** **On**, so each sync also syncs the server with AnkiWeb.
 
-Then choose **Flashcards → Sync with Anki** on the reader.
+Then choose **Flashcards → Sync Flashcards** on the reader.
+
+Each sync also syncs the server with AnkiWeb, before and after the reader's own changes. When the two cannot be merged (a full sync, for example after a note type was changed in Anki desktop), the server takes AnkiWeb's copy, adds back what the reader sent since the last AnkiWeb sync (reviews, mined words, new decks and note types), and sends that to AnkiWeb. A note is only added back if the fields and card templates of its note type were not changed in Anki, a note or card deleted in Anki stays deleted, and for one changed on both sides the newer change wins, as in Anki.
 
 ## Migaku
 
@@ -61,7 +64,7 @@ TZ=Europe/Berlin
 
 `TZ` should be your time zone: Migaku's day starts at 4 am local time, and the server counts days the same way.
 
-On the reader, in **Settings → Connectivity → Migaku Sync**: **Migaku Server Address** is this server's address (as for Anki), **Migaku Server Key** your `MATCHA_TOKEN`, and **Migaku Decks** the decks to sync, for example `French::My Cards`.
+On the reader, in **Settings → Connectivity → Flashcards Sync**: **Use Sync Server** on with this server's address and your `MATCHA_TOKEN` (the same as for Anki), **Migaku Server** set to **Sync Server**, and **Migaku Decks** the decks to sync, for example `French::My Cards`.
 
 This uses Migaku's own sync protocol, which Migaku does not document; a Migaku update can break it. It signs in only with email and password (not Google or Apple sign-in).
 

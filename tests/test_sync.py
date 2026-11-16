@@ -116,3 +116,118 @@ def test_round_trip(tmp_path, sync_server):
     # The imported review; setting the due date adds Anki's own "rescheduled" entry (ease 0) beside it.
     assert b.db.scalar("select count() from revlog where cid = ? and ease > 0", int(card_id)) == 1
     b.close()
+
+
+def test_full_sync_keeps_unsent(tmp_path, sync_server):
+    """AnkiWeb asks for a full sync while the server holds the reader's unsent note and review:
+    the server takes AnkiWeb's copy, keeps its own changes and sends them."""
+    a = Collection(str(tmp_path / "a.anki2"))
+    note = a.new_note(a.models.by_name("Basic"))
+    note["Front"], note["Back"] = "木漏れ日", "sunlight through leaves"
+    a.add_note(note, a.decks.id("Japanese::Mining"))
+    a.close()
+    desktop_sync(str(tmp_path / "a.anki2"), sync_server, upload=True).close()
+
+    settings = ankiweb.SyncSettings("user", "pass", sync_server, str(tmp_path / "auth.json"))
+    api = Api(str(tmp_path / "server.anki2"), settings)
+    try:
+        assert api.call("operations.get", api.call("collection.sync", {}))["state"] == "succeeded"
+        # The reader makes its own note type and deck, then a note in them.
+        api.call("noteTypes.create", {"name": "Matcha", "fields": [{"name": "Word"}, {"name": "Meaning"}],
+                                      "templates": [{"name": "Card 1", "questionHtml": "{{Word}}",
+                                                     "answerHtml": "{{Meaning}}"}]})
+        api.call("decks.create", {"name": "French::Mined"})
+        created = api.call("notes.createMany", {"notes": [{
+            "noteType": {"name": "Matcha"}, "deck": {"name": "French::Mined"},
+            "fields": {"Word": "懐かしい", "Meaning": "nostalgic"}}]})["items"][0]
+        card_id = created["result"]["cardIds"][0]
+        review = {"id": str(int(time.time() * 1000) - 3600_000), "cardId": card_id, "rating": "good",
+                  "interval": {"value": 3, "unit": "days"}, "previousInterval": {"value": 0, "unit": "days"},
+                  "factor": {"encoding": "unknown", "value": 0}, "elapsedMs": 3000, "kind": "review"}
+        assert api.call("operations.get", api.call("advanced.reviews.import", {"reviews": [review]}))["state"] \
+            == "succeeded"
+
+        # Meanwhile desktop A changes the schema and uploads: the server's next sync is a full one.
+        a = Collection(str(tmp_path / "a.anki2"))
+        a.mod_schema(check=False)
+        a.close()
+        desktop_sync(str(tmp_path / "a.anki2"), sync_server, upload=True).close()
+
+        assert api.call("operations.get", api.call("collection.sync", {}))["state"] == "succeeded"
+        assert not [p for p in os.listdir(tmp_path) if ".before-full-sync" in p]
+    finally:
+        api.col.close()
+
+    b = desktop_sync(str(tmp_path / "b.anki2"), sync_server, upload=False)
+    assert len(b.find_notes('"Front:木漏れ日"')) == 1
+    assert len(b.find_notes('"Word:懐かしい" "deck:French::Mined" note:Matcha')) == 1
+    assert b.db.scalar("select count() from revlog where cid = ? and ease > 0", int(card_id)) == 1
+    b.close()
+
+
+def test_full_sync_respects_changed_note_type(tmp_path, sync_server):
+    """Desktop adds a field to the note type the server's unsent note uses: that note is not put
+    back in the old shape, AnkiWeb's copy stays as it is, and the sync still succeeds."""
+    a = Collection(str(tmp_path / "a.anki2"))
+    note = a.new_note(a.models.by_name("Basic"))
+    note["Front"], note["Back"] = "木漏れ日", "sunlight through leaves"
+    a.add_note(note, a.decks.id("Japanese::Mining"))
+    a.close()
+    desktop_sync(str(tmp_path / "a.anki2"), sync_server, upload=True).close()
+
+    settings = ankiweb.SyncSettings("user", "pass", sync_server, str(tmp_path / "auth.json"))
+    api = Api(str(tmp_path / "server.anki2"), settings)
+    try:
+        assert api.call("operations.get", api.call("collection.sync", {}))["state"] == "succeeded"
+        api.call("notes.createMany", {"notes": [{"noteType": {"name": "Basic"}, "deck": {"name": "Japanese::Mining"},
+                                                 "fields": {"Front": "懐かしい", "Back": "nostalgic"}}]})
+        a = Collection(str(tmp_path / "a.anki2"))
+        basic = a.models.by_name("Basic")
+        a.models.add_field(basic, a.models.new_field("Notes"))
+        a.models.update_dict(basic)
+        a.close()
+        desktop_sync(str(tmp_path / "a.anki2"), sync_server, upload=True).close()
+
+        assert api.call("operations.get", api.call("collection.sync", {}))["state"] == "succeeded"
+        assert not [p for p in os.listdir(tmp_path) if ".before-full-sync" in p]
+    finally:
+        api.col.close()
+
+    b = desktop_sync(str(tmp_path / "b.anki2"), sync_server, upload=False)
+    assert len(b.find_notes('"Front:木漏れ日"')) == 1
+    assert b.find_notes('"Front:懐かしい"') == []
+    assert len(b.models.by_name("Basic")["flds"]) == 3
+    b.close()
+
+
+def test_full_sync_keeps_notes_after_css_edit(tmp_path, sync_server):
+    """A note type edit that does not change its fields or templates (here CSS) does not stop the
+    server's unsent notes of that type from being kept."""
+    a = Collection(str(tmp_path / "a.anki2"))
+    note = a.new_note(a.models.by_name("Basic"))
+    note["Front"], note["Back"] = "木漏れ日", "sunlight through leaves"
+    a.add_note(note, a.decks.id("Japanese::Mining"))  # an empty AnkiWeb would be overwritten by an upload
+    a.close()
+    desktop_sync(str(tmp_path / "a.anki2"), sync_server, upload=True).close()
+
+    settings = ankiweb.SyncSettings("user", "pass", sync_server, str(tmp_path / "auth.json"))
+    api = Api(str(tmp_path / "server.anki2"), settings)
+    try:
+        assert api.call("operations.get", api.call("collection.sync", {}))["state"] == "succeeded"
+        api.call("notes.createMany", {"notes": [{"noteType": {"name": "Basic"}, "deck": {"name": "Japanese::Mining"},
+                                                 "fields": {"Front": "懐かしい", "Back": "nostalgic"}}]})
+        a = Collection(str(tmp_path / "a.anki2"))
+        basic = a.models.by_name("Basic")
+        basic["css"] += "\n.card { color: teal; }"
+        a.models.update_dict(basic)
+        a.mod_schema(check=False)
+        a.close()
+        desktop_sync(str(tmp_path / "a.anki2"), sync_server, upload=True).close()
+        assert api.call("operations.get", api.call("collection.sync", {}))["state"] == "succeeded"
+    finally:
+        api.col.close()
+
+    b = desktop_sync(str(tmp_path / "b.anki2"), sync_server, upload=False)
+    assert len(b.find_notes('"Front:懐かしい"')) == 1
+    assert "teal" in b.models.by_name("Basic")["css"]
+    b.close()
