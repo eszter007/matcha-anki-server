@@ -39,6 +39,10 @@ def not_found(what: str) -> RpcError:
     return RpcError(1001, "notFound", f"{what} not found.")
 
 
+def unsupported(message: str) -> RpcError:
+    return RpcError(1006, "unsupportedCapability", message)
+
+
 def invalid(message: str) -> RpcError:
     return RpcError(-32602, "invalidParams", message)
 
@@ -503,11 +507,13 @@ class Api:
         }
 
     def _card(self, raw: Any):
+        from anki.errors import NotFoundError
+
+        card_id = entity_id(raw, "cardId")
         try:
-            return self.col.get_card(entity_id(raw, "cardId"))
-        except RpcError:
-            raise
-        except Exception:
+            return self.col.get_card(card_id)
+        except NotFoundError:
+            # Only a missing card: the device drops a review it gets notFound for.
             raise not_found("Card") from None
 
     def cards_get_many(self, params: dict) -> dict:
@@ -575,6 +581,9 @@ class Api:
         card = self._card(params.get("cardId"))
         patch = params.get("patch") or {}
         if "fsrsMemory" in patch:
+            # As Anki desktop: an SM-2 collection keeps no FSRS memory.
+            if not self.col.get_config("fsrs", False):
+                raise unsupported("FSRS is off in this collection.")
             memory = patch["fsrsMemory"]
             card.memory_state = None if memory is None else FSRSMemoryState(
                 stability=float(memory["stabilityDays"]), difficulty=float(memory["difficulty"]))
