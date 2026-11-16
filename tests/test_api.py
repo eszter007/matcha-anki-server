@@ -116,12 +116,36 @@ def test_reviews_import_list_and_schedule(api, schema):
 
     due = call(api, schema, "scheduling.setDueDate", {"cardIds": [card_id], "days": "3"})
     assert "result" in due["items"][0]
+    api.col.set_config("fsrs", True)
     card = call(api, schema, "advanced.cards.update",
                 {"cardId": card_id, "patch": {"fsrsMemory": {"difficulty": 5.5, "stabilityDays": 4.2}}})
     memory = card["scheduling"]["fsrsMemory"]  # Anki keeps these as 32-bit floats
     assert memory["difficulty"] == pytest.approx(5.5) and memory["stabilityDays"] == pytest.approx(4.2)
     got = call(api, schema, "cards.getMany", {"ids": [card_id]})["items"][0]["result"]
     assert got["scheduling"]["type"] == "review"
+
+
+def test_cards_update_without_fsrs(api, schema):
+    card_id = add(api, schema)["result"]["cardIds"][0]
+    call(api, schema, "scheduling.setDueDate", {"cardIds": [card_id], "days": "4"})
+    card = call(api, schema, "advanced.cards.update", {"cardId": card_id, "patch": {"intervalDays": 4}})
+    assert card["scheduling"]["intervalDays"] == 4
+    with pytest.raises(RpcError) as e:
+        api.call("advanced.cards.update",
+                 {"cardId": card_id, "patch": {"fsrsMemory": {"difficulty": 5.5, "stabilityDays": 4.2}}})
+    assert (e.value.code, e.value.kind) == (1006, "unsupportedCapability")
+    assert api.call("cards.getMany", {"ids": [card_id]})["items"][0]["result"]["scheduling"]["fsrsMemory"] is None
+
+
+def test_missing_card_is_not_found(api, schema):
+    review = {"id": "1791633600000", "cardId": "1700000000999", "rating": "good",
+              "interval": {"value": 3, "unit": "days"}, "previousInterval": {"value": 0, "unit": "days"},
+              "factor": {"encoding": "unknown", "value": 0}, "elapsedMs": 0, "kind": "review"}
+    handle = api.call("advanced.reviews.import", {"reviews": [review]})
+    assert api.call("operations.get", {"operationId": handle["operationId"]})["error"]["data"]["type"] == "notFound"
+    with pytest.raises(RpcError) as e:
+        api.call("advanced.cards.update", {"cardId": "1700000000999", "patch": {"intervalDays": 1}})
+    assert e.value.kind == "notFound"
 
 
 def test_unknown_method(api):
