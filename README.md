@@ -44,6 +44,16 @@ Then choose **Flashcards → Sync Flashcards** on the reader.
 
 Each sync also syncs the server with AnkiWeb, before and after the reader's own changes. When the two cannot be merged (a full sync, for example after a note type was changed in Anki desktop), the server takes AnkiWeb's copy, adds back what the reader sent since the last AnkiWeb sync (reviews, mined words, new decks and note types), and sends that to AnkiWeb. A note is only added back if the fields and card templates of its note type were not changed in Anki, a note or card deleted in Anki stays deleted, and for one changed on both sides the newer change wins, as in Anki.
 
+### CrossPoint with Dessen plugins
+
+The [Flashcards plugin](https://github.com/eszter007/dessen-matcha-plugins/tree/main/plugins/flashcards) for CrossPoint syncs with this server too. Put a `config.json` in the plugin's folder on the SD card:
+
+```json
+{"server": "http://<server address>:8080", "key": "<your MATCHA_TOKEN>", "anki": ["Deck name"], "migaku": ["Deck name"]}
+```
+
+The plugin only decodes PNG. It asks for other pictures as `<file>.png` (for example `photo.jpg.png`), and the server sends them converted to a grayscale PNG that fits an e-ink screen, as it does for WebP.
+
 ## Migaku
 
 The server can also bring your Migaku decks to the reader, next to (or instead of) Anki. It signs in to Migaku with your account, keeps a copy of your Migaku collection, and answers the reader at `/migaku/api/v1` with the same API as for Anki.

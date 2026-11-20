@@ -220,6 +220,31 @@ def test_media_get_shrinks_large_images(api, schema):
         assert max(im.size) == 800 and im.format == "PNG"
 
 
+def test_media_get_png_copy_of_another_format(api, schema):
+    import base64
+    import io
+    import os
+
+    from PIL import Image
+
+    photo = io.BytesIO()
+    Image.new("RGB", (1200, 900), (30, 120, 200)).save(photo, format="JPEG")
+    with open(os.path.join(api.col.media.dir(), "photo.jpg"), "wb") as f:
+        f.write(photo.getvalue())
+    # The JPEG itself, unchanged in format.
+    data = base64.b64decode(call(api, schema, "media.get", {"filename": "photo.jpg"})["data"])
+    with Image.open(io.BytesIO(data)) as im:
+        assert im.format == "JPEG"
+    # Asked for as "<file>.png": a grayscale PNG that fits an e-ink screen.
+    r = call(api, schema, "media.get", {"filename": "photo.jpg.png"})
+    assert r["filename"] == "photo.jpg.png"
+    with Image.open(io.BytesIO(base64.b64decode(r["data"]))) as im:
+        assert im.format == "PNG" and im.mode == "L" and max(im.size) == 480
+    # Nothing behind either name: still notFound.
+    with pytest.raises(RpcError):
+        api.call("media.get", {"filename": "missing.jpg.png"})
+
+
 def test_render_type_in_answer(api, schema):
     m = api.col.models.by_name("Basic (type in the answer)")
     n = api.col.new_note(m)

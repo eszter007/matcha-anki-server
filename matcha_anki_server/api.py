@@ -55,6 +55,11 @@ def webp_to_png(data: bytes, max_side: int = 480) -> bytes:
         from PIL import Image
 
         with Image.open(io.BytesIO(data)) as im:
+            # Transparent parts on white, as the reader shows them, not black.
+            if im.mode in ("RGBA", "LA", "P"):
+                im = im.convert("RGBA")
+                background = Image.new("RGBA", im.size, (255, 255, 255, 255))
+                im = Image.alpha_composite(background, im)
             im = im.convert("L")
             im.thumbnail((max_side, max_side))
             out = io.BytesIO()
@@ -560,16 +565,27 @@ class Api:
         name = str(params.get("filename", ""))
         if not name or "/" in name or "\\" in name or name.startswith("."):
             raise invalid("filename must be a plain media file name")
-        path = os.path.join(self.col.media.dir(), name)
-        if not os.path.isfile(path) and self.media_source is not None:
-            fetched = self.media_source(self.col, name)
-            if fetched:
-                self.col.media.write_data(name, fetched)
-        if not os.path.isfile(path):
+
+        def local(file: str) -> str | None:
+            path = os.path.join(self.col.media.dir(), file)
+            if not os.path.isfile(path) and self.media_source is not None:
+                fetched = self.media_source(self.col, file)
+                if fetched:
+                    self.col.media.write_data(file, fetched)
+            return path if os.path.isfile(path) else None
+
+        path = local(name)
+        # "<file>.png" for a picture stored in another format (a JPEG, a GIF): a reader that only
+        # decodes PNG asks for it this way, as the device asks for "<file>.webp". Same params as
+        # AnkiConnect's media.get, so the request stays within its schema.
+        converted = path is None and name.lower().endswith(".png") and len(name) > 4
+        if converted:
+            path = local(name[:-4])
+        if path is None:
             raise not_found("Media file")
         with open(path, "rb") as f:
             data = f.read()
-        if name.lower().endswith(".webp"):
+        if converted or name.lower().endswith(".webp"):
             data = webp_to_png(data)  # e-ink readers decode PNG, not WebP
         else:
             data = shrink_image(data, name)
