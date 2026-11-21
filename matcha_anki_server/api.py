@@ -23,6 +23,10 @@ QUEUES = {0: "new", 1: "learning", 2: "review", 3: "dayLearning", 4: "preview", 
 MAX_PAGE = 1000
 
 
+class RawReply(bytes):
+    """A result sent as it is (application/octet-stream), not as JSON: device.pack's packed cards."""
+
+
 class RpcError(Exception):
     """A JSON-RPC error with AnkiConnect's code and error type."""
 
@@ -168,6 +172,10 @@ class Api:
             "device.renderMany": self.device_render_many,
             "device.picture": self.device_picture,
             "device.cardsUpdateMany": self.device_cards_update_many,
+            # A device's sync in few requests: every chosen deck's preset, newest review and
+            # cards in one, then many new cards at once, packed as the device stores them.
+            "device.decks": self.device_decks,
+            "device.pack": self.device_pack,
         }
 
     def call(self, method: str, params: dict) -> Any:
@@ -193,6 +201,138 @@ class Api:
             except RpcError as error:
                 items.append({"index": index, "error": error.to_json()})
         return {"items": items}
+
+    def device_decks(self, params: dict) -> dict:
+        """What a device needs to sync its decks, in one reply.
+
+        {"decks": [{"id", "name", "presetId", "since", "offset"}], "limit"} -> {"decks": [{"id",
+        "settings", "latestReviewId", "total", "cards": "cardId.noteId.edited ...", "nextOffset"}]}.
+        cards (one string, cheap for a small device to parse) follow cards.search for '"deck:<name>" -is:suspended', in its order, from offset;
+        edited is 1 when the note changed after since (unix seconds, two minutes' slack for the
+        device's clock). limit caps the cards of the whole reply; a deck cut short has nextOffset,
+        and decks past the limit come without cards (asked for again from nextOffset)."""
+        budget = max(1, min(int(params.get("limit", 2000)), 5000))
+        out = []
+        for ref in params.get("decks") or []:
+            if not isinstance(ref, dict):
+                raise invalid("decks must hold deck references")
+            deck_id = entity_id(ref.get("id"), "decks.id")
+            entry: dict = {"id": str(deck_id), "settings": None}
+            if ref.get("presetId"):
+                try:
+                    entry["settings"] = self.deck_presets_get({"preset": {"id": ref["presetId"]}})["settings"]
+                except RpcError:
+                    pass
+            entry["latestReviewId"] = self.reviews_latest({"deck": {"id": deck_id}})["id"]
+            offset = max(int(ref.get("offset") or 0), 0)
+            if budget <= 0:
+                entry["nextOffset"] = offset
+                out.append(entry)
+                continue
+            name = str(ref.get("name") or self.col.decks.get(deck_id)["name"])
+            query = '"deck:{}" -is:suspended'.format(name.replace('"', '\\"'))
+            try:
+                ids = self.col.find_cards(query)
+            except Exception as error:
+                raise RpcError(1013, "invalidSearch", str(error)) from None
+            page = list(ids[offset:offset + budget])
+            budget -= len(page)
+            since = int(ref.get("since") or 0)
+            rows: dict[int, tuple[int, int]] = {}
+            for start in range(0, len(page), 500):
+                part = page[start:start + 500]
+                for cid, nid, mod in self.col.db.all(
+                        "select c.id, c.nid, n.mod from cards c join notes n on n.id = c.nid "
+                        f"where c.id in ({','.join('?' * len(part))})", *part):
+                    rows[cid] = (nid, mod)
+            entry["total"] = len(ids)
+            entry["cards"] = " ".join(f"{cid}.{rows[cid][0]}.{1 if since and rows[cid][1] > since - 120 else 0}"
+                                      for cid in page if cid in rows)
+            if offset + len(page) < len(ids):
+                entry["nextOffset"] = offset + len(page)
+            out.append(entry)
+        return {"decks": out}
+
+    def device_pack(self, params: dict) -> RawReply:
+        """New cards already in the device's own chunk format, as raw bytes, so a small device
+        writes them to its card without parsing them.
+
+        {"ids": [...] (at most 1000), "maxBytes"} -> sections, each a u8 kind, u32 length (little
+        endian) and that many bytes: kind 1 a JSON header {"done": how many of ids this reply
+        covers, "studied": [{"id", "scheduling"}], "fields": [{"id", "fields"}] (Matcha sentence
+        notes, which the device encodes itself), "images": [names], "css": {file: css},
+        "missing": [ids]}; kind 2 a chunk of sides (u32 count, then per card u64 id, u32 + front,
+        u32 + back) of the HTML cards. The reply ends once it passes maxBytes; the device asks
+        again from ids[done:]."""
+        import json
+        import re
+        import struct
+
+        ids = params.get("ids") or []
+        if len(ids) > 1000:
+            raise invalid("at most 1000 ids")
+        max_bytes = max(1024, min(int(params.get("maxBytes", 96 * 1024)), 1024 * 1024))
+        chunk_bytes = 64 * 1024
+        img = re.compile(r"""<img\b[^>]*?\bsrc\s*=\s*["']?([^"'\s>]+)""", re.I)
+
+        def fnv(text: str) -> str:
+            h = 0x811C9DC5
+            for b in text.encode("utf-8"):
+                h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+            return f"css-{h:08x}"
+
+        header: dict = {"studied": [], "fields": [], "images": [], "css": {}, "missing": []}
+        chunks: list[bytes] = []
+        current: list[bytes] = []
+        current_size = 0
+        total = 0
+        done = 0
+
+        def close_chunk():
+            nonlocal current, current_size
+            if current:
+                chunks.append(struct.pack("<I", len(current)) + b"".join(current))
+                current, current_size = [], 0
+
+        for raw in ids:
+            if total >= max_bytes:
+                break
+            done += 1
+            try:
+                card = self._card(raw)
+            except RpcError:
+                header["missing"].append(str(raw))
+                continue
+            note = card.note()
+            if card.type != 0:
+                header["studied"].append({"id": str(card.id), "scheduling": self._card_json(card)["scheduling"]})
+            if note.note_type()["name"] == "Matcha sentence":
+                header["fields"].append({"id": str(card.id), "fields": dict(note.items())})
+                total += 200
+                continue
+            shown = self.cards_render({"id": raw})
+            css_name = fnv(shown["css"])
+            header["css"][css_name] = shown["css"]
+            for side in (shown["questionHtml"], shown["answerHtml"]):
+                for name in img.findall(side):
+                    if name not in header["images"]:
+                        header["images"].append(name)
+            entry = struct.pack("<Q", card.id)
+            for side in (shown["questionHtml"], shown["answerHtml"]):
+                data = ("\u001eH" + css_name + "\u001f" + side).encode("utf-8")
+                entry += struct.pack("<I", len(data)) + data
+            if current_size + len(entry) > chunk_bytes:
+                close_chunk()
+            current.append(entry)
+            current_size += len(entry)
+            total += len(entry)
+        close_chunk()
+        header["done"] = done
+        head = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        out = bytearray(struct.pack("<BI", 1, len(head)) + head)
+        for c in chunks:
+            out += struct.pack("<BI", 2, len(c)) + c
+        return RawReply(bytes(out))
 
     def device_cards_update_many(self, params: dict) -> dict:
         """advanced.cards.update for many cards: {"items": [{"cardId", "patch"}]}."""

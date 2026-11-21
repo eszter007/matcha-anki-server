@@ -153,3 +153,23 @@ def test_lzo_stream_is_one_literal_run():
     long = b"x" * 300  # the extension's encoder: 0, a 0 per 255, then the rest of length - 18
     assert lzo1x_stored(long)[:3] == bytes([0, 0, 300 - 18 - 255]) and lzo1x_stored(long).endswith(b"\x11\x00\x00")
     assert lzo1x_stored(b"y" * 528)[:3] == bytes([0, 0, 255])
+
+
+def test_mirror_answers_the_device_sync(tmp_path):
+    """A mirrored Migaku card reaches the device through device.decks and device.pack, studied."""
+    api = Api(str(tmp_path / "m.anki2"), None)
+    mirror = Mirror(api.col)
+    mirror.apply([card()], today=19998)
+    cid = mirror.card_for("c1")
+    did = api.col.get_card(cid).did
+    deck = next(d for d in api.call("decks.list", {}) if d["id"] == str(did))
+    out = api.call("device.decks", {"decks": [{"id": deck["id"], "name": deck["name"], "presetId": deck["presetId"]}]})
+    d = out["decks"][0]
+    assert d["cards"].split()[0].split(".")[0] == str(cid) and d["latestReviewId"] is not None
+    import json
+    import struct
+
+    raw = bytes(api.call("device.pack", {"ids": [str(cid)]}))
+    head = json.loads(raw[5:5 + struct.unpack_from("<I", raw, 1)[0]])
+    assert head["done"] == 1 and head["studied"][0]["scheduling"]["intervalDays"] == 4
+    api.col.close()

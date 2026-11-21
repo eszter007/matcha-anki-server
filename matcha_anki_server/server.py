@@ -22,7 +22,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import ankiweb, migaku_bridge
-from .api import Api, RpcError
+from .api import Api, RawReply, RpcError
 
 MAX_BODY = 4 * 1024 * 1024
 log = logging.getLogger("matcha_anki_server")
@@ -77,7 +77,10 @@ def make_handler(apis: dict[str, Api], token: str):
                 return
             try:
                 result = api.call(str(request["method"]), request.get("params") or {})
-                self._reply(request.get("id"), result=result)
+                if isinstance(result, RawReply):  # packed for a device: sent as it is
+                    self._send(200, bytes(result), "application/octet-stream")
+                else:
+                    self._reply(request.get("id"), result=result)
             except RpcError as error:
                 self._reply(request.get("id"), error=error.to_json())
             except Exception:  # never leak a traceback to the client

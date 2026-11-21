@@ -328,3 +328,60 @@ def test_device_picture_is_one_bit_and_fits(api):
     row = (380 + 7) // 8
     assert len(bits) == row * 190
     assert bits[0] == 0xFF and bits[row - 1] == 0  # black left, white right
+
+
+def test_device_decks_lists_cards_with_edits_and_pages(api):
+    import time
+
+    made = api.call("notes.createMany", {"notes": [{"noteType": {"name": "Basic"}, "deck": {"name": "Japanese::Mining"},
+                                                    "fields": {"Front": f"w{i}", "Back": "b"}} for i in range(5)]})
+    ids = [int(i["result"]["cardIds"][0]) for i in made["items"]]
+    deck = next(d for d in api.call("decks.list", {}) if d["name"] == "Japanese::Mining")
+    ref = {"id": deck["id"], "name": deck["name"], "presetId": deck["presetId"], "since": int(time.time()) + 3600}
+    out = api.call("device.decks", {"decks": [ref], "limit": 3})["decks"][0]
+    assert out["settings"]["newPerDay"] >= 0 and out["latestReviewId"] is None
+    assert out["total"] == 5 and out["nextOffset"] == 3
+    rows = lambda e: [tuple(int(x) for x in t.split(".")) for t in e["cards"].split()]
+    assert [c[0] for c in rows(out)] == ids[:3] and all(c[2] == 0 for c in rows(out))
+    rest = api.call("device.decks", {"decks": [dict(ref, offset=3)]})["decks"][0]
+    assert [c[0] for c in rows(rest)] == ids[3:] and "nextOffset" not in rest
+    edited = api.call("device.decks", {"decks": [dict(ref, since=int(time.time()) - 60)]})["decks"][0]
+    assert all(c[2] == 1 for c in rows(edited))
+
+
+def test_device_pack_gives_the_device_chunk_format(api):
+    import json
+    import struct
+
+    made = api.call("notes.createMany", {"notes": [
+        {"noteType": {"name": "Basic"}, "deck": {"name": "Japanese::Mining"}, "fields": {"Front": f"w{i}", "Back": '<img src="a.png">'}}
+        for i in range(30)] + [
+        {"noteType": {"name": "Matcha sentence"}, "deck": {"name": "Japanese::Mining"}, "fields": {"Word": "犬", "Sentence": "犬。"}}]})
+    ids = [i["result"]["cardIds"][0] for i in made["items"]]
+    raw = bytes(api.call("device.pack", {"ids": ids + ["1"], "maxBytes": 1024}))
+    sections, p = [], 0
+    while p < len(raw):
+        kind, n = struct.unpack_from("<BI", raw, p)
+        sections.append((kind, raw[p + 5:p + 5 + n]))
+        p += 5 + n
+    head = json.loads(sections[0][1])
+    assert sections[0][0] == 1 and 0 < head["done"] < 32 and head["images"] == ["a.png"]
+    cards = []
+    for kind, body in sections[1:]:
+        assert kind == 2
+        (count,), q = struct.unpack_from("<I", body), 4
+        for _ in range(count):
+            cid, = struct.unpack_from("<Q", body, q)
+            q += 8
+            sides = []
+            for _ in range(2):
+                n, = struct.unpack_from("<I", body, q)
+                sides.append(body[q + 4:q + 4 + n].decode())
+                q += 4 + n
+            cards.append((cid, sides))
+    assert [str(c[0]) for c in cards] == ids[:head["done"]]
+    css_file = cards[0][1][0][2:].split("\x1f")[0]
+    assert cards[0][1][0].startswith("\x1eHcss-") and css_file in head["css"]
+    rest = bytes(api.call("device.pack", {"ids": ids[head["done"]:] + ["1"]}))
+    tail = json.loads(rest[5:5 + struct.unpack_from("<I", rest, 1)[0]])
+    assert tail["fields"][0]["fields"]["Word"] == "犬" and tail["missing"] == ["1"]
