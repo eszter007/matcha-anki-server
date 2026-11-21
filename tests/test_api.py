@@ -295,3 +295,36 @@ def test_device_today_gives_due_days_from_today(api):
     api.call("scheduling.setDueDate", {"cardIds": [card_id], "days": "5"})
     card = api.call("cards.getMany", {"ids": [card_id]})["items"][0]["result"]
     assert card["scheduling"]["due"] == {"kind": "day", "day": today + 5}
+
+
+def test_device_render_many_and_cards_update_many(api):
+    made = api.call("notes.createMany", {"notes": [{"noteType": {"name": "Matcha sentence"}, "deck": {"name": "Japanese::Mining"},
+                                                    "fields": {"Word": w, "Sentence": w + "。"}} for w in ("犬", "鳥")]})
+    ids = [i["result"]["cardIds"][0] for i in made["items"]]
+    out = api.call("device.renderMany", {"ids": ids + ["1"]})["items"]
+    assert [i["index"] for i in out] == [0, 1, 2]
+    assert "犬" in out[0]["result"]["questionHtml"] and "error" in out[2]
+    up = api.call("device.cardsUpdateMany", {"items": [{"cardId": ids[0], "patch": {"intervalDays": 4}}]})["items"]
+    assert up[0]["result"]["ok"]
+    assert api.call("cards.getMany", {"ids": ids[:1]})["items"][0]["result"]["scheduling"]["intervalDays"] == 4
+
+
+def test_device_picture_is_one_bit_and_fits(api):
+    import base64
+    import io
+    import os
+
+    from PIL import Image
+
+    img = Image.new("RGBA", (800, 400), (0, 0, 0, 255))
+    img.paste((255, 255, 255, 0), (400, 0, 800, 400))  # right half transparent: white
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    with open(os.path.join(api.col.media.dir(), "half.png"), "wb") as f:
+        f.write(buf.getvalue())
+    p = api.call("device.picture", {"filename": "half.png", "maxWidth": 380, "maxHeight": 320})
+    assert (p["width"], p["height"]) == (380, 190)
+    bits = base64.b64decode(p["bits"])
+    row = (380 + 7) // 8
+    assert len(bits) == row * 190
+    assert bits[0] == 0xFF and bits[row - 1] == 0  # black left, white right

@@ -163,6 +163,11 @@ class Api:
             # Outside the API schema, for devices: the scheduler's day, so a card's due day
             # ("due": {"kind": "day"}) can be told as days from today.
             "device.today": self.device_today,
+            # Also outside the schema, to make a device's sync quicker: many cards' sides in one
+            # request, a picture ready for a one-bit panel, and many card updates at once.
+            "device.renderMany": self.device_render_many,
+            "device.picture": self.device_picture,
+            "device.cardsUpdateMany": self.device_cards_update_many,
         }
 
     def call(self, method: str, params: dict) -> Any:
@@ -178,6 +183,75 @@ class Api:
 
     def device_today(self, _params: dict) -> dict:
         return {"day": self.col.sched.today}
+
+    def device_render_many(self, params: dict) -> dict:
+        """cards.render for many cards: {"ids": [...]} -> {"items": [{"index", "result" | "error"}]}."""
+        items = []
+        for index, raw in enumerate(params.get("ids") or []):
+            try:
+                items.append({"index": index, "result": self.cards_render({"id": raw})})
+            except RpcError as error:
+                items.append({"index": index, "error": error.to_json()})
+        return {"items": items}
+
+    def device_cards_update_many(self, params: dict) -> dict:
+        """advanced.cards.update for many cards: {"items": [{"cardId", "patch"}]}."""
+        out = []
+        for index, item in enumerate(params.get("items") or []):
+            try:
+                self.cards_update(item if isinstance(item, dict) else {})
+                out.append({"index": index, "result": {"ok": True}})
+            except RpcError as error:
+                out.append({"index": index, "error": error.to_json()})
+        return {"items": out}
+
+    def device_picture(self, params: dict) -> dict:
+        """A picture as a one-bit panel draws it: any format, transparency on white, scaled down
+        (box average) to fit maxWidth x maxHeight, ordered-dithered (4x4 Bayer) as the device's own
+        PNG path does. {"filename", "maxWidth", "maxHeight"} -> {"width", "height", "bits"}, bits
+        base64 of rows of (width + 7) / 8 bytes, MSB first, set = ink."""
+        import base64
+
+        from PIL import Image
+
+        name = str(params.get("filename", ""))
+        path = self._media_path(name)
+        if path is None:
+            raise not_found("Media file")
+        max_w = max(1, min(int(params.get("maxWidth", 380)), 2000))
+        max_h = max(1, min(int(params.get("maxHeight", 320)), 2000))
+        with Image.open(path) as im:
+            im.seek(0)
+            im = im.convert("RGBA")
+            white = Image.new("RGBA", im.size, (255, 255, 255, 255))
+            gray = Image.alpha_composite(white, im).convert("L")
+        w, h = gray.size
+        tw = max(1, min(max_w, w * max_h // max(h, 1), w))
+        th = max(1, min(h * tw // w, max_h))
+        if (tw, th) != (w, h):
+            gray = gray.resize((tw, th), Image.BOX)
+        bayer = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]]
+        px = gray.load()
+        row_bytes = (tw + 7) // 8
+        out = bytearray(row_bytes * th)
+        for y in range(th):
+            for x in range(tw):
+                if px[x, y] < bayer[y & 3][x & 3] * 16 + 8:
+                    out[y * row_bytes + x // 8] |= 0x80 >> (x % 8)
+        return {"width": tw, "height": th, "bits": base64.b64encode(bytes(out)).decode("ascii")}
+
+    def _media_path(self, name: str) -> str | None:
+        """A media file's path, fetched from the media source when missing here."""
+        import os
+
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            raise invalid("filename must be a plain media file name")
+        path = os.path.join(self.col.media.dir(), name)
+        if not os.path.isfile(path) and self.media_source is not None:
+            fetched = self.media_source(self.col, name)
+            if fetched:
+                self.col.media.write_data(name, fetched)
+        return path if os.path.isfile(path) else None
 
     def describe(self, _params: dict) -> dict:
         from anki.buildinfo import version
