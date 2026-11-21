@@ -160,6 +160,9 @@ class Api:
             "reviews.getLatestId": self.reviews_latest,
             "advanced.cards.update": self.cards_update,
             "scheduling.setDueDate": self.set_due_date,
+            # Outside the API schema, for devices: the scheduler's day, so a card's due day
+            # ("due": {"kind": "day"}) can be told as days from today.
+            "device.today": self.device_today,
         }
 
     def call(self, method: str, params: dict) -> Any:
@@ -172,6 +175,9 @@ class Api:
             return handler(params)
 
     # --- discovery and operations
+
+    def device_today(self, _params: dict) -> dict:
+        return {"day": self.col.sched.today}
 
     def describe(self, _params: dict) -> dict:
         from anki.buildinfo import version

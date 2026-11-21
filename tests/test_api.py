@@ -284,3 +284,14 @@ def test_deck_note_type_and_move(api):
     card = made["items"][0]["result"]["cardIds"][0]
     api.call("cards.move", {"ids": [card], "deck": {"id": deck["id"]}})
     assert api.call("cards.getMany", {"ids": [card]})["items"][0]["result"]["deck"]["id"] == deck["id"]
+
+
+def test_device_today_gives_due_days_from_today(api):
+    today = api.call("device.today", {})["day"]
+    made = api.call("notes.createMany", {"notes": [{"noteType": {"name": "Matcha sentence"},
+                                                    "deck": {"name": "Japanese::Mining"},
+                                                    "fields": {"Word": "猫", "Sentence": "猫がいる。"}}]})
+    card_id = made["items"][0]["result"]["cardIds"][0]
+    api.call("scheduling.setDueDate", {"cardIds": [card_id], "days": "5"})
+    card = api.call("cards.getMany", {"ids": [card_id]})["items"][0]["result"]
+    assert card["scheduling"]["due"] == {"kind": "day", "day": today + 5}
